@@ -1,0 +1,24 @@
+[Unit]
+Description=render — Highlight Video Assembly HTTP Service (GPU)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/usr/service/source/scenemaker/worker/worker-render
+Environment="PATH=/usr/service/source/scenemaker/worker/worker-render/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+ExecStartPre=/bin/mkdir -p /usr/service/logs/scenemaker/render
+ExecStart=/usr/service/source/scenemaker/worker/worker-render/.venv/bin/python main.py
+TimeoutStartSec=120
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10
+KillMode=mixed
+LimitNOFILE=1048576
+LimitNPROC=1048576
+
+[Install]
+WantedBy=multi-user.target

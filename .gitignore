@@ -1,0 +1,39 @@
+# ── 비밀값 / 환경
+.env
+
+# ── Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# ── 가상환경 (uv)
+.venv/
+venv/
+
+# ── 로그 (기본 출력은 /usr/service/logs/scenemaker/render — 레포 밖이다)
+*.log
+logs/
+
+# ── 영상 데이터 — 디렉토리 구조만 남기고 내용(원본·범퍼·결과물)은 제외
+data/*
+!data/input/
+!data/output/
+data/input/*
+data/output/*
+!data/input/.gitkeep
+!data/output/.gitkeep
+
+*.mp4
+*.mkv
+*.mov
+*.ts
+
+# ── OS / 에디터
+.DS_Store
+.idea/
+.vscode/
+*.swp
