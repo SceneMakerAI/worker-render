@@ -2,6 +2,7 @@
 
 시간은 사실상 전부 cut 이다 (실측 조각당 1.3s, concat 은 200MB 에 0.26s).
 """
+import json
 import logging
 import shutil
 import threading
@@ -29,11 +30,6 @@ _KEEP_FINISHED = 100        # 끝난 잡을 몇 개까지 기억할지 (Future �
 
 class QueueFull(RuntimeError):
     """대기열이 가득 찼다. 호출부가 429 로 옮긴다."""
-
-
-def make_output_filename(v_id: int, c_id: int) -> Path:
-    """{OUTPUT_DATA_DIR}/{v_id}/{v_id}_{c_id}.mp4 (절대경로)."""
-    return (config.OUTPUT_DATA_DIR / str(v_id) / f"{v_id}_{c_id}.mp4").resolve()
 
 
 def cut_parts(parts: list[ReqTimeRange], media_info: MediaInfo, work: Path) -> list[Path]:
@@ -76,8 +72,7 @@ def start(v_id: int, c_id: int, parts: list[ReqTimeRange], media_info: MediaInfo
     대기열이 꽉 차면 QueueFull — 호출부가 429 로 옮긴다.
     """
     key = (v_id, c_id)
-    out = make_output_filename(v_id, c_id)
-    work = out.parent / f"work_{c_id}"
+    out, _, work = util.render_paths(v_id, c_id)
 
     # 등록까지 한 번에 잠근다. 검사와 submit 이 벌어지면 동시 요청이 상한을 넘어 들어온다.
     with _lock:
@@ -92,9 +87,10 @@ def start(v_id: int, c_id: int, parts: list[ReqTimeRange], media_info: MediaInfo
 
         # 디렉토리는 submit 전에 만든다 — 스레드 안에서 터지면 폴링해야만 알 수 있다
         shutil.rmtree(work, ignore_errors=True)     # 재처리 대비 — 옛 조각이 섞이지 않도록
-        work.mkdir(parents=True, exist_ok=True)     # parents=True 가 출력 디렉토리까지 만든다
+        work.mkdir(parents=True, exist_ok=True)
+        out.parent.mkdir(parents=True, exist_ok=True)   # result/
 
-        future = _executor.submit(_cut_and_render, parts, media_info, work, out)
+        future = _executor.submit(_cut_and_render, v_id, c_id, parts, media_info)
         _jobs[key] = future
         _forget_old()
 
@@ -107,7 +103,7 @@ def start(v_id: int, c_id: int, parts: list[ReqTimeRange], media_info: MediaInfo
 
 def status(v_id: int, c_id: int) -> ResRender | None:
     """메모리에 잡이 있으면 그 상태, 없으면 결과 파일 존재로 done 판정. 둘 다 없으면 None."""
-    out = make_output_filename(v_id, c_id)
+    out, _, _ = util.render_paths(v_id, c_id)
     with _lock:
         future = _jobs.get((v_id, c_id))
 
@@ -140,28 +136,37 @@ def _forget_old():
         del _jobs[key]
 
 
-def _cut_and_render(parts: list[ReqTimeRange], media_info: MediaInfo, work: Path,
-                    out: Path) -> Path:
+def _cut_and_render(v_id: int, c_id: int,
+                    parts: list[ReqTimeRange], media_info: MediaInfo) -> Path:
     """워커 스레드 본체. 중간 조각은 끝나면 정리한다 (config 로 보존 가능).
 
-    S3URL 이 설정돼 있으면 {S3URL}/{v_id}/{v_id}_{c_id}.mp4 로 올린다. 업로드가 실패하면 잡도
-    error 다 — 로컬에만 있고 전달이 안 된 걸 done 이라 하면 부르는 쪽이 없는 걸 가져가려 한다.
+    S3URL 이 설정돼 있으면 대상 전부에 올린다. 전부 실패하면 잡도 error 다 — 로컬에만 있고
+    어디에도 전달이 안 된 걸 done 이라 하면 부르는 쪽이 없는 걸 가져가려 한다.
     """
+    render_video_file, render_json_file, render_dir = util.render_paths(v_id, c_id)
+
     try:
-        files = cut_parts(parts, media_info, work)
-        result = render(files, work, out)
-        if s3.enabled():
-            s3.upload(result, f"{out.parent.name}/{out.name}")
-            # 원본에서 어떻게 잘렸는지 — 범퍼(0~0)는 우리가 끼운 거라 뺀다
-            s3.upload_json([p.model_dump(exclude={"src"}) for p in parts if not p.whole_file],
-                           f"{out.parent.name}/{out.stem}.json")
+        cut_files = cut_parts(parts, media_info, render_dir)
+        render_video_file = render(cut_files, render_dir, render_video_file)
+
+
+        ranges = [p.model_dump(exclude={"src"}) for p in parts if not p.whole_file]
+        render_json_file.write_text(json.dumps(ranges, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+        for s3url in config.S3URL:
+            video_url, json_url = util.s3_result_paths(s3url, v_id, c_id)
+            s3.upload_file(render_video_file, video_url)
+            s3.upload_file(render_json_file, json_url)
+
     except Exception:
         # 여기서 안 찍으면 비동기 실패는 아무 데도 안 남는다 — Future 를 아무도 안 꺼내보므로
-        log.exception(f"{work} render failed")
-        _clean_work(work, config.DELETE_WORK_DIR["ERROR"])
+        log.exception(f"{render_dir} render failed")
+        _clean_work(render_dir, config.DELETE_WORK_DIR["ERROR"])
         raise
-    _clean_work(work, config.DELETE_WORK_DIR["SUCCESS"])
-    return result
+    _clean_work(render_dir, config.DELETE_WORK_DIR["SUCCESS"])
+    return render_video_file
+
 
 
 def _clean_work(work: Path, delete: int):

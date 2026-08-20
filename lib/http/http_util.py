@@ -16,13 +16,11 @@ from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+import config
 from lib import util
 from lib.dto import MediaInfo, ReqTimeRanges
 from lib.media import ffmpeg
-
-# 확장자만으로 먼저 걸러낸다 (ffprobe 를 띄우기 전 값싼 1차 필터)
-VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".m4v", ".avi", ".ts", ".mts",
-                  ".mpg", ".mpeg", ".webm", ".wmv", ".flv"}
+from lib.storage import s3
 
 
 def register(app):
@@ -69,7 +67,35 @@ def err(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"code": code, "message": message})
 
 
-def check_video(file_path: Path | str, groups: dict[str, ReqTimeRanges]) -> MediaInfo:
+def download_video(v_id: int) -> Path:
+    """렌더에 쓸 원본의 로컬 경로를 돌려준다. 필요하면 S3 에서 받아온다.
+
+    S3URL 이 비어 있으면 로컬만 본다. 있으면 매번 S3 와 크기를 비교하는데, 같으면
+    download_file 이 알아서 건너뛴다 — 원본이 갱신된 경우를 놓치지 않으려는 것이다.
+
+    받아올 곳은 S3URL 의 **첫 번째**. 수십 GB 라 실제로 받으면 몇 분 걸리고, 그동안 요청
+    스레드가 붙잡혀 있다. S3 에도 없으면 404 로 끝난다.
+    """
+    vod_dir, local_file = util.vod_paths(v_id)
+
+    if not config.S3URL:                # S3 를 안 쓰는 환경 — 로컬에 있는 것만 쓴다
+        if not local_file.exists():
+            raise err(404, "SOURCE_NOT_FOUND", f"원본이 없습니다: {local_file}")
+        return local_file
+
+    _, s3_file = util.s3_paths(v_id)
+    try:
+        vod_dir.mkdir(parents=True, exist_ok=True)
+        s3.download_file(s3_file, local_file)
+    except Exception as e:              # noqa: BLE001 — 못 받으면 원본이 없는 것과 같다
+        raise err(404, "SOURCE_NOT_FOUND",
+                  f"원본을 S3 에서 받지 못했습니다: s3_file={s3_file}, local_file={local_file} ({e})")
+
+    return local_file
+
+
+
+def check_video_format(file_path: Path | str, groups: dict[str, ReqTimeRanges]) -> MediaInfo:
     """영상 파일과 구간을 한 번에 검사하고 MediaInfo 를 돌려준다.
 
     확장자만 보면 이름만 .mp4 인 텍스트 파일을 통과시키므로 ffprobe 로 실제 영상 스트림까지 확인한다.
@@ -83,10 +109,6 @@ def check_video(file_path: Path | str, groups: dict[str, ReqTimeRanges]) -> Medi
       구간 이상   → 400 INVALID_SEGMENT
     """
     video_file = Path(file_path)
-    if not video_file.exists() or not video_file.is_file():
-        raise err(404, "SOURCE_NOT_FOUND", f"원본을 찾을 수 없습니다: {video_file}")
-    if video_file.suffix.lower() not in VIDEO_SUFFIXES:
-        raise err(400, "INVALID_VIDEO", f"원본이 영상 파일이 아닙니다: {video_file.name}")
     try:
         # ffmpeg 계층은 dto 를 모른다 (미디어만 아는 채로 두려고) — 받는 쪽에서 형변환한다
         media_info = MediaInfo(**ffmpeg.probe(video_file))   # 영상 스트림이 없으면 RuntimeError

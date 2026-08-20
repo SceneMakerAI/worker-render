@@ -24,7 +24,6 @@ log = logging.getLogger(__name__)
 class SoccerRequest(BaseModel):
     v_id: int
     c_id: int
-    file_name: str
     sync_yn: bool = True
     bumper_yn: bool = False              # 축구 범퍼 규격 미정 — 기본 off
     groups: dict[str, ReqTimeRanges]     # ⚠ 키 형식 미확정 (예: 1_half)

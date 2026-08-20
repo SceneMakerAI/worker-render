@@ -17,9 +17,8 @@ import logging
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-import config
 from lib.dto import ReqTimeRanges, ResRender
-from lib.http.http_util import check_video, err, log_req, log_res
+from lib.http.http_util import download_video, check_video_format, err, log_req, log_res
 from lib.svc import bumper, compose
 from lib.svc import render as render_svc
 
@@ -31,7 +30,6 @@ log = logging.getLogger(__name__)
 class BaseballRequest(BaseModel):
     v_id: int                            # 영상 ID
     c_id: int                            # 하이라이트 편성 ID (agent compose 생성)
-    file_name: str                       # 원본 파일명 — {INPUT_DATA_DIR}/{file_name}
     sync_yn: bool = True
     bumper_yn: bool = False                  # 이닝 범퍼 삽입 여부
     innings: dict[str, ReqTimeRanges]    # 키 = {이닝번호}_{top|bot} (예: 1_top, 5_bot)
@@ -42,11 +40,12 @@ def baseball(req: BaseballRequest):
     log_req(req)
 
     # 검사 — 모든 입력이 문제 없는지. 여기서 걸리면 잡을 만들지 않고 404/400 으로 끝낸다
-    src = config.INPUT_DATA_DIR / req.file_name
-    media_info = check_video(src, req.innings)
+    local_file = download_video(req.v_id)
+    media_info = check_video_format(local_file, req.innings)
 
-    # 조립 — 이닝 편성 → 조각 목록. 어떤 범퍼를 쓸지는 야구만 아는 규칙이라 여기서 넘긴다
-    parts = compose.to_media_parts(src, req.innings,
+
+    # 조립 — 이닝 편성 → 조각 목록. 어떤 ㅊ 쓸지는 야구만 아는 규칙이라 여기서 넘긴다
+    parts = compose.to_media_parts(local_file, req.innings,
                                    bumper.paths("baseball") if req.bumper_yn else None)
 
     # thread 호출 — sync_yn=false 면 accepted 로 즉시, true 면 렌더가 끝난 뒤 done/error 로 돌아온다
