@@ -15,6 +15,10 @@ docs/supply-chain/exceptions.md 의 "유효한" 예외와 대조한다.
 
 --redact(공개 저장소): 로그·요약에 건수와 적용된 예외번호만 남긴다.
 
+--allowed-ghsa: 유효한 예외 중 GHSA 번호만 공백으로 구분해 출력하고 끝낸다.
+  PR 워크플로가 이 목록을 GitHub dependency review의 allow-ghsas로 넘긴다(공개 저장소).
+  식별자 칸에는 'CVE-2026-1234, GHSA-xxxx-xxxx-xxxx'처럼 여러 번호를 함께 적을 수 있다.
+
 --report-only: 결과만 기록하고 실패시키지 않는다(관찰 모드).
 결과는 표준 출력과 GitHub Step Summary($GITHUB_STEP_SUMMARY)에 남고,
 --json-out 을 주면 판정 결과를 JSON으로 저장한다(완료 증거용).
@@ -65,16 +69,17 @@ def load_exceptions(path, today):
         if set("".join(cells)) <= set("-: "):
             continue
         row = dict(zip(header, cells))
-        ident = row.get("식별자", row.get("CVE/식별자", "")).strip()
-        if not re.match(ID_RE, ident, re.I):
+        raw = row.get("식별자", row.get("CVE/식별자", ""))
+        idents = [t.upper() for t in re.split(r"[\s,/]+", raw) if re.match(ID_RE, t, re.I)]
+        if not idents:
             continue
-        ident = ident.upper()
         exp = row.get("만료일", "")
         ok = (row.get("상태") == "유효" and row.get("승인자") and re.match(r"^\d{4}-\d{2}-\d{2}$", exp) and exp >= today)
-        if ok:
-            valid[ident] = row
-        else:
-            invalid.append((ident, row.get("예외번호", ""), "만료" if exp and exp < today else "상태·승인자·만료일 확인"))
+        for ident in idents:
+            if ok:
+                valid[ident] = row
+            else:
+                invalid.append((ident, row.get("예외번호", ""), "만료" if exp and exp < today else "상태·승인자·만료일 확인"))
     return valid, invalid
 
 
@@ -87,7 +92,13 @@ def main():
     ap.add_argument("--json-out")
     ap.add_argument("--redact", action="store_true",
                     help="공개 저장소용: 로그·요약에 건수만 남기고 식별자·구성요소는 숨긴다 (--json-out에는 전체 기록)")
+    ap.add_argument("--allowed-ghsa", action="store_true",
+                    help="유효한 예외의 GHSA 번호만 출력하고 끝낸다 (dependency review 허용 목록용)")
     a = ap.parse_args()
+    if a.allowed_ghsa:
+        valid, _ = load_exceptions(a.exceptions, datetime.date.today().isoformat())
+        print(" ".join(sorted("GHSA-" + i[5:].lower() for i in valid if i.startswith("GHSA-"))))  # GHSA 표기: 접두어 대문자, 나머지 소문자
+        return
     if not a.security:
         ap.error("--security 가 필요합니다")
 
