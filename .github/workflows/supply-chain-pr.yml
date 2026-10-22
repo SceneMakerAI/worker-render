@@ -20,15 +20,34 @@ jobs:
   dependency-review:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write     # 실패 시 PR에 요약 댓글 (comment-summary-in-pr)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # 예외 승인 반영: exceptions.md의 유효한 예외(GHSA)를 allow-ghsas로 붙인 설정 사본을 만든다.
+      # 예외 기록은 exceptions.md 한 곳뿐이다. 만료일이 지나면 PR 점검도 다시 실패한다.
+      - name: 예외 승인 반영 (exceptions.md → allow-ghsas)
+        run: |
+          if grep -q '^allow-ghsas' .github/dependency-review-config.yml; then
+            echo "::error::allow-ghsas를 dependency-review-config.yml에 직접 쓰지 않는다. 예외는 docs/supply-chain/exceptions.md에 기록한다."
+            exit 1
+          fi
+          CFG=./dependency-review-merged.yml
+          cp .github/dependency-review-config.yml "$CFG"
+          IDS=$(python3 scripts/supply-chain/vuln_gate.py --allowed-ghsa --exceptions docs/supply-chain/exceptions.md)
+          if [ -n "$IDS" ]; then
+            printf '\nallow-ghsas:\n' >> "$CFG"
+            for g in $IDS; do printf '  - %s\n' "$g" >> "$CFG"; done
+          fi
+          echo "예외 승인으로 허용한 GHSA: ${IDS:-없음}" >> "$GITHUB_STEP_SUMMARY"
       # 공개 저장소는 무료. 비공개 저장소는 GitHub Advanced Security(Code Security)가 필요하다.
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
-          # 기준은 별도 파일에서 관리 (CODEOWNERS로 변경 시 승인 필요)
-          config-file: ./.github/dependency-review-config.yml
+          # 기준은 .github/dependency-review-config.yml (CODEOWNERS로 변경 시 승인 필요) + 위 단계의 예외 반영
+          config-file: ./dependency-review-merged.yml
 
   sbom-preview:
     runs-on: ubuntu-latest
