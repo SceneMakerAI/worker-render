@@ -1,0 +1,57 @@
+# 거버넌스 필수 파일 점검 (거버넌스 가이드 7장 부록 governance-check.yml 기반)
+# 필수 파일 삭제나 필수 절 누락을 CI로 막는다. 내용의 타당성은 사람이 검토한다.
+# main Ruleset의 required status check로 지정한다.
+name: governance-check
+
+# Ruleset의 필수 상태 점검으로 지정하므로 paths 필터를 두지 않는다
+# (필터가 있으면 해당 파일을 안 건드린 PR이 "Expected" 대기 상태로 멈춘다). 실행은 수 초.
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  required-governance-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Check required files and sections
+        shell: bash
+        run: |
+          set -euo pipefail
+          for file in GOVERNANCE.md MAINTAINERS.md CODE_OF_CONDUCT.md SECURITY.md .github/CODEOWNERS docs/supply-chain/exceptions.md; do
+            test -s "$file" || { echo "Missing or empty: $file"; exit 1; }
+          done
+
+          for heading in \
+            "목적과 적용범위" \
+            "역할과 권한" \
+            "합의와 표결" \
+            "역할 부여" \
+            "휴면·사임·해임" \
+            "분쟁과 상향" \
+            "변경과 정기검토"; do
+            grep -Fq "$heading" GOVERNANCE.md || {
+              echo "Missing GOVERNANCE.md section: $heading"
+              exit 1
+            }
+          done
+
+          if grep -Eq '\[프로젝트명\]|@ORG/|TODO|\{\{[A-Z_]+\}\}' GOVERNANCE.md MAINTAINERS.md SECURITY.md CODE_OF_CONDUCT.md .github/CODEOWNERS .github/workflows/supply-chain-release.yml docs/decisions/GDR-0001-supply-chain-ci.md; then
+            echo "Template placeholders remain. Replace them before merging."
+            exit 1
+          fi
+
+          # 공급망 통제 경로에 Code Owner가 지정돼 있는지 확인
+          for path in "/.github/workflows/" "/scripts/supply-chain/" "/docs/supply-chain/exceptions.md"; do
+            grep -Eq "^${path}[[:space:]]+@" .github/CODEOWNERS || {
+              echo "CODEOWNERS has no owner for: $path"
+              exit 1
+            }
+          done

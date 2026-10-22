@@ -1,0 +1,46 @@
+name: Maintainer 추천
+description: Reviewer 또는 Maintainer 역할 부여를 제안합니다 (GOVERNANCE.md 7. 역할 부여)
+title: "[역할 추천] "
+labels: ["governance"]
+body:
+  - type: input
+    id: nominee
+    attributes:
+      label: 후보 GitHub ID
+      placeholder: "@username"
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: 추천 역할
+      options:
+        - Reviewer
+        - Maintainer
+    validations:
+      required: true
+  - type: textarea
+    id: area
+    attributes:
+      label: 책임 영역
+      description: 예) 렌더링 파이프라인, 의존성 관리, CI
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 기여 근거
+      description: 최근 6개월의 PR, 리뷰, 문서, 보안 기여 링크
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 확인
+      options:
+        - label: 후보자가 역할과 책임(GOVERNANCE.md 3장)을 확인하고 수락했다
+          required: true
+        - label: 이해충돌(GOVERNANCE.md 9장)을 공개했다
+          required: true
+        - label: 7일 의견기간 후 결정과 근거를 이 이슈에 기록한다
+          required: true

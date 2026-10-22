@@ -1,0 +1,26 @@
+# worker-render 코드 소유자 (거버넌스 가이드 5장 "GitHub 권한과 연결한다")
+# 역할 정의는 GOVERNANCE.md, 현재 명단은 MAINTAINERS.md를 따른다.
+# 이 파일만으로는 강제되지 않는다. main Ruleset에서 "Require review from Code Owners"를 켠다.
+
+# 기본: Maintainer(임민성) 또는 Project Lead 중 1명 승인 (저장소 담당자 = 임민성)
+*                                   @MinsungIM @jplee-creator
+
+# 신규·변경 의존성 = "중요" 결정 (공급망 가이드라인 Lv4 신규 의존성 선정 점검)
+/pyproject.toml                     @MinsungIM @jplee-creator
+/uv.lock                            @MinsungIM @jplee-creator
+
+# 공급망 CI와 게이트: 우회 수정 방지 (Maintainer·Project Lead·공급망 관리자 중 1명)
+/.github/workflows/                 @MinsungIM @jplee-creator @SolboxOSS
+/.github/dependency-review-config.yml @MinsungIM @jplee-creator @SolboxOSS
+/scripts/supply-chain/              @MinsungIM @jplee-creator @SolboxOSS
+
+# 취약점·라이선스 예외 = 위험 수용 승인 (정책 RACI: 승인 A = 총괄책임자)
+/docs/supply-chain/exceptions.md    @jplee-creator
+
+# 거버넌스 통제 파일 (Project Lead 또는 공급망 관리자)
+/GOVERNANCE.md                      @jplee-creator @SolboxOSS
+/MAINTAINERS.md                     @jplee-creator @SolboxOSS
+/.github/CODEOWNERS                 @jplee-creator @SolboxOSS
+/SECURITY.md                        @jplee-creator @SolboxOSS
+/CODE_OF_CONDUCT.md                 @jplee-creator @SolboxOSS
+/docs/decisions/                    @MinsungIM @jplee-creator @SolboxOSS

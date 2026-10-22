@@ -1,0 +1,77 @@
+# 공급망 점검 ① PR — 신규 의존성을 병합 전에 확인한다
+# 가이드라인 3장 4절 "PR에서 신규 의존성을 먼저 차단한다"
+#   - GitHub dependency review: 이 PR이 추가·변경하는 의존성의 취약점·라이선스 판정
+#   - BomLens 스캔: 병합 후 상태의 SBOM 미리보기 + Critical 취약점 알림(exceptions.md 반영, 실패시키지 않음)
+#     차단은 ③ 릴리즈 게이트에서만 한다. PR에서는 "이대로 릴리즈하면 막힌다"를 미리 알려 준다.
+# 차단 기준은 정책(위키 1. 정책 및 역할)과 맞춘다. 처음에는 Critical·GPL-3.0/AGPL-3.0만 차단한다.
+name: supply-chain-pr
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  BOMLENS_VERSION: "1.13.7"   # 스캐너 버전 고정 (가이드라인 3장 10절). 올릴 때는 검토 후 함께 바꾼다
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # 공개 저장소는 무료. 비공개 저장소는 GitHub Advanced Security(Code Security)가 필요하다.
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          # 기준은 별도 파일에서 관리 (CODEOWNERS로 변경 시 승인 필요)
+          config-file: ./.github/dependency-review-config.yml
+
+  sbom-preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: BomLens 준비
+        run: |
+          git clone --depth 1 --branch "v${BOMLENS_VERSION}" https://github.com/sktelecom/bomlens.git "$RUNNER_TEMP/bomlens"
+          docker pull "ghcr.io/sktelecom/bomlens:${BOMLENS_VERSION}"
+      - name: SBOM·취약점 스캔
+        env:
+          SBOM_SCANNER_IMAGE: ghcr.io/sktelecom/bomlens:${{ env.BOMLENS_VERSION }}
+        run: |
+          VER="pr${{ github.event.pull_request.number }}-$(git rev-parse --short=7 HEAD)"
+          "$RUNNER_TEMP/bomlens/scripts/scan-sbom.sh" \
+            --project "${{ github.event.repository.name }}" --version "$VER" \
+            --sbom-author "Solbox Inc." \
+            --output-dir "$RUNNER_TEMP/sbom" \
+            --all --generate-only \
+            --fail-on empty-result
+      # 취약점 알림: 기준 이상 취약점 중 유효한 예외가 없는 것이 있으면 PR 화면에 경고를 남긴다
+      - name: 취약점 알림 (예외 반영, 실패시키지 않음)
+        run: |
+          REPO="${{ github.event.repository.name }}"
+          VER="pr${{ github.event.pull_request.number }}-$(git rev-parse --short=7 HEAD)"
+          D="$RUNNER_TEMP/sbom/${REPO}_${VER}"
+          python3 scripts/supply-chain/vuln_gate.py --report-only --severity critical \
+            --security "$D/${REPO}_${VER}_security.json" \
+            --exceptions docs/supply-chain/exceptions.md \
+            --json-out "$RUNNER_TEMP/pr-gate.json" \
+            ${{ github.event.repository.private && ' ' || '--redact' }}
+          N=$(jq '.blocked | length' "$RUNNER_TEMP/pr-gate.json")
+          E=$(jq '.excepted | length' "$RUNNER_TEMP/pr-gate.json")
+          if [ "$N" -gt 0 ]; then
+            echo "::warning title=공급망 취약점 ${N}건::Critical 이상 취약점 ${N}건이 예외 승인 없이 남아 있다. 이대로 릴리즈하면 게이트에서 차단된다. 업그레이드하거나 예외 절차를 밟는다."
+          elif [ "$E" -gt 0 ]; then
+            echo "::notice title=예외 승인 적용 ${E}건::Critical 이상 취약점 ${E}건이 exceptions.md의 유효한 예외로 처리된다."
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom-pr
+          path: ${{ runner.temp }}/sbom/*/*_bom.json
+          retention-days: 14

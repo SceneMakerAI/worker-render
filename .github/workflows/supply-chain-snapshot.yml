@@ -1,0 +1,74 @@
+# 공급망 점검 ② 스냅샷 — main 변경 시와 매월 1일, 지금 손으로 하는 월간 스캔을 대신한다
+# 가이드라인 2장 Lv3 "SBOM 정기 생성 + 자동 취약점 점검", 3장 12절 "관찰 모드로 기준선을 만든다"
+#   - 버전 이름은 수동 스캔과 같은 규칙: main-<커밋날짜 YYYYMMDD>-<커밋번호>
+#   - 이 워크플로는 실패시키지 않고 기록만 한다(관찰 모드). 차단은 ③ 릴리즈에서 한다.
+#   - 결과 zip을 내려받아 위키 「3. 저장소별 SBOM 현황」과 통합자산목록에 반영한다.
+name: supply-chain-snapshot
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 0 1 * *"   # 매월 1일 09:00 (KST)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-chain-snapshot
+  cancel-in-progress: true
+
+env:
+  BOMLENS_VERSION: "1.13.7"
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: 버전 이름 결정
+        id: ver
+        run: echo "version=$(git log -1 --format=main-%cd-%h --abbrev=7 --date=format:%Y%m%d)" >> "$GITHUB_OUTPUT"
+      - name: BomLens 준비
+        run: |
+          git clone --depth 1 --branch "v${BOMLENS_VERSION}" https://github.com/sktelecom/bomlens.git "$RUNNER_TEMP/bomlens"
+          docker pull "ghcr.io/sktelecom/bomlens:${BOMLENS_VERSION}"
+      - name: 전체 스캔 (CycloneDX + SPDX + 고지문 + 보안 리포트)
+        env:
+          SBOM_SCANNER_IMAGE: ghcr.io/sktelecom/bomlens:${{ env.BOMLENS_VERSION }}
+        run: |
+          "$RUNNER_TEMP/bomlens/scripts/scan-sbom.sh" \
+            --project "${{ github.event.repository.name }}" --version "${{ steps.ver.outputs.version }}" \
+            --sbom-author "Solbox Inc." \
+            --output-dir "$RUNNER_TEMP/sbom" \
+            --all --generate-only
+      - name: 취약점 현황 (관찰 모드 — 실패시키지 않음)
+        run: |
+          D="$RUNNER_TEMP/sbom/${{ github.event.repository.name }}_${{ steps.ver.outputs.version }}"
+          python3 scripts/supply-chain/vuln_gate.py --report-only --severity high \
+            --security "$D/${{ github.event.repository.name }}_${{ steps.ver.outputs.version }}_security.json" \
+            --json-out "$D/gate-result.json" \
+            ${{ github.event.repository.private && ' ' || '--redact' }}
+      # 공개 저장소의 Actions 산출물은 누구나 내려받을 수 있다. 보안 리포트는 비공개 저장소에서만 올린다.
+      - name: 결과 보관 (비공개 저장소 — 전체)
+        if: github.event.repository.private
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ github.event.repository.name }}_${{ steps.ver.outputs.version }}
+          path: ${{ runner.temp }}/sbom/
+          retention-days: 90
+      - name: 결과 보관 (공개 저장소 — 보안 리포트 제외)
+        if: ${{ !github.event.repository.private }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ github.event.repository.name }}_${{ steps.ver.outputs.version }}
+          path: |
+            ${{ runner.temp }}/sbom/*/*_bom.json
+            ${{ runner.temp }}/sbom/*/*_bom.spdx.json
+            ${{ runner.temp }}/sbom/*/*_NOTICE.*
+            ${{ runner.temp }}/sbom/*/*_conformance.*
+          retention-days: 90
