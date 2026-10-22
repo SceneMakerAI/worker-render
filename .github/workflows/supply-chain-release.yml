@@ -1,0 +1,175 @@
+# 공급망 점검 ③ 릴리즈 — 배포 버전의 SBOM·고지패키지를 만들고, 기준을 넘으면 첨부를 막고 Release에 실패를 표시한다
+# 가이드라인 3장 5~10절 release-sbom.yml 순서를 BomLens로 구현:
+#   1 게시된 Release에서 실행 → 2 정확한 태그 checkout → 3 실제 설치(빌드) 검증
+#   → 4 배포 아티팩트·체크섬 → 5 SPDX·CycloneDX 생성 → 6 SBOM 검증(적합성·빈 결과·라이선스 식별률)
+#   → 7 취약점 게이트(예외 승인 연동) → 8 provenance·SBOM attestation → 9 Release asset 첨부
+#   어느 단계든 실패하면 Release를 prerelease로 바꾸고 본문 맨 앞에 "사용 금지" 경고를 붙인다
+#   (on: release라 Release는 이미 게시된 상태다. 게이트가 막는 것은 SBOM·고지패키지 첨부뿐이다)
+# 이 저장소는 장비에 git clone 후 uv sync로 설치되므로, 배포 아티팩트는 태그의 소스 묶음(tar.gz)이다.
+name: supply-chain-release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  BOMLENS_VERSION: "1.13.7"
+  GATE_SEVERITY: critical      # 단계적 강화: critical → (안정화 후) high. 1. 정책의 조치 기한과 맞춘다
+  # 설치 검증용 Python. 고정하지 않으면 uv가 requires-python 범위의 최신 버전을 받아
+  # wheel이 없는 패키지를 소스 빌드하다 실패할 수 있다. 장비의 Python 버전과 맞춘다.
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  release-sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # 거버넌스 가이드: 릴리즈는 Project Lead 승인 후 실행. Settings → Environments → release → Required reviewers
+    environment: release
+    permissions:
+      contents: write          # Release asset 업로드
+      id-token: write          # attestation 서명
+      attestations: write      # attestation 저장 (비공개 저장소는 GitHub Enterprise Cloud 필요)
+    env:
+      REPO: ${{ github.event.repository.name }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      # 2. 정확한 태그 checkout
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+
+      # 3. 실제 설치 검증: 장비와 같은 방식(uv.lock 그대로)으로 의존성이 설치되는지 확인
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: 설치 검증 (uv sync --frozen)
+        env:
+          # 가상환경을 checkout 밖에 만든다. 스캔 대상에 .venv가 남지 않게 한다
+          # (BomLens 1.13.7에는 경로 제외 옵션이 없음)
+          UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/venv
+          UV_PYTHON: ${{ env.PYTHON_VERSION }}
+        run: uv sync --frozen --no-dev
+
+      # 4. 배포 아티팩트: 태그의 소스 묶음
+      - name: 배포 아티팩트 생성
+        run: |
+          mkdir -p "$RUNNER_TEMP/dist"
+          git archive --format=tar.gz --prefix="${REPO}-${TAG}/" -o "$RUNNER_TEMP/dist/${REPO}-${TAG}.tar.gz" HEAD
+
+      - name: BomLens 준비
+        run: |
+          git clone --depth 1 --branch "v${BOMLENS_VERSION}" https://github.com/sktelecom/bomlens.git "$RUNNER_TEMP/bomlens"
+          docker pull "ghcr.io/sktelecom/bomlens:${BOMLENS_VERSION}"
+
+      # 5·6. SBOM 생성과 검증. 아래 조건 중 하나라도 걸리면 이 단계에서 실패한다(종료 2·4·5)
+      - name: SBOM 생성 + 검증 게이트
+        env:
+          SBOM_SCANNER_IMAGE: ghcr.io/sktelecom/bomlens:${{ env.BOMLENS_VERSION }}
+        run: |
+          "$RUNNER_TEMP/bomlens/scripts/scan-sbom.sh" \
+            --project "$REPO" --version "$TAG" \
+            --sbom-author "Solbox Inc." \
+            --output-dir "$RUNNER_TEMP/sbom" \
+            --all --generate-only \
+            --fail-on-conformance \
+            --fail-on empty-result \
+            --fail-on license-coverage=95 \
+            --fail-on malicious-package
+
+      # 7. 취약점 게이트: 기준 이상 취약점 중 exceptions.md의 유효한 예외가 없는 것이 있으면 실패
+      - name: 취약점 게이트 (예외 승인 연동)
+        run: |
+          D="$RUNNER_TEMP/sbom/${REPO}_${TAG}"
+          python3 scripts/supply-chain/vuln_gate.py --severity "$GATE_SEVERITY" \
+            --security "$D/${REPO}_${TAG}_security.json" \
+            --exceptions docs/supply-chain/exceptions.md \
+            --json-out "$D/gate-result.json" \
+            ${{ github.event.repository.private && ' ' || '--redact' }}
+
+      # 고지패키지 (가이드라인 2장 4-3): 고지문 + 라이선스 원문 + NOTICE 원문
+      - name: 고지패키지 생성
+        run: |
+          python3 scripts/supply-chain/make_notice_package.py \
+            "$RUNNER_TEMP/sbom/${REPO}_${TAG}/${REPO}_${TAG}_bom.json" --out "$RUNNER_TEMP/notice"
+          cp "$RUNNER_TEMP/notice/${REPO}_${TAG}-oss-docs.zip" "$RUNNER_TEMP/dist/"
+
+      # Release에 올릴 이름으로 정리 + 체크섬
+      - name: 게시 파일 정리 + 체크섬
+        run: |
+          D="$RUNNER_TEMP/sbom/${REPO}_${TAG}"
+          cd "$RUNNER_TEMP/dist"
+          cp "$D/${REPO}_${TAG}_bom.json"      "${REPO}-${TAG}.cdx.json"
+          cp "$D/${REPO}_${TAG}_bom.spdx.json" "${REPO}-${TAG}.spdx.json"
+          cp "$D/${REPO}_${TAG}_NOTICE.txt"    "${REPO}-${TAG}-NOTICE.txt"
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+
+      # 8. 아티팩트와 SBOM의 관계 증명 (소비자 검증: gh attestation verify <tar.gz> --repo <owner>/<repo>)
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/${{ env.REPO }}-${{ env.TAG }}.tar.gz
+      - name: Attest SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/dist/${{ env.REPO }}-${{ env.TAG }}.tar.gz
+          sbom-path: ${{ runner.temp }}/dist/${{ env.REPO }}-${{ env.TAG }}.spdx.json
+
+      # 9. Release asset 첨부. --clobber를 쓰지 않는다(이미 공개된 SBOM 교체 금지, 가이드라인 3장 8절)
+      - name: Release asset 첨부
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "$RUNNER_TEMP/dist"
+          gh release upload "$TAG" --repo "${{ github.repository }}" \
+            "${REPO}-${TAG}.tar.gz" "${REPO}-${TAG}.cdx.json" "${REPO}-${TAG}.spdx.json" \
+            "${REPO}-${TAG}-NOTICE.txt" "${REPO}_${TAG}-oss-docs.zip" SHA256SUMS
+
+      # 게이트 실패 표시: on: release라 Release는 이미 게시돼 있다. 실패 사실을 Release 화면에 남기고
+      # prerelease로 바꿔 Latest에서 뺀다 (어느 단계에서 실패해도 실행)
+      # 배포 가능 판정: 정식 Release(prerelease 아님) + 첨부 6개(SHA256SUMS 포함). docs/supply-chain/README.md 참조
+      - name: 게이트 실패 표시 (prerelease 전환 + 경고)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          G="$RUNNER_TEMP/sbom/${REPO}_${TAG}/gate-result.json"
+          {
+            echo "> [!WARNING]"
+            echo "> **공급망 게이트 실패 — 이 릴리즈를 배포에 사용하지 않는다.** SBOM·고지패키지가 첨부되지 않았다."
+            echo "> 실행: $RUN_URL"
+            if [ -f "$G" ]; then
+              jq -r '.counts|"> 전체: Critical \(.CRITICAL) · High \(.HIGH) · Medium \(.MEDIUM)"' "$G"
+              if [ "$PRIVATE" = "true" ]; then
+                jq -r '.blocked[]|"> - 차단: \(.id) \(.pkg) \(.ver) (\(.sev), 수정 \(.fix))"' "$G"
+              else
+                jq -r '"> 차단 \(.blocked|length)건 (상세는 비공개 경로에서 확인)"' "$G"
+              fi
+            fi
+            echo
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body
+          } > "$RUNNER_TEMP/release-notes.md"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --prerelease --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      # 내부 검증용 원시 결과. 공개 저장소는 보안 리포트를 빼고 올린다.
+      - name: 원시 결과 보관 (비공개 저장소 — 전체)
+        if: always() && github.event.repository.private
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.REPO }}_${{ env.TAG }}
+          path: ${{ runner.temp }}/sbom/
+          retention-days: 90
+      - name: 원시 결과 보관 (공개 저장소 — 보안 리포트 제외)
+        if: always() && !github.event.repository.private
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ env.REPO }}_${{ env.TAG }}
+          path: |
+            ${{ runner.temp }}/sbom/*/*_bom.json
+            ${{ runner.temp }}/sbom/*/*_bom.spdx.json
+            ${{ runner.temp }}/sbom/*/*_conformance.*
+          retention-days: 90

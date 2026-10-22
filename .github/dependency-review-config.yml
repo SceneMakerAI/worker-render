@@ -1,0 +1,12 @@
+# PR 신규 의존성 점검 기준 (공급망 가이드라인 3장 4절, 예제 dependency-review-config.yml 기반)
+# 기준의 근거는 사내 정책(위키 「1. 정책 및 역할」 6. 라이선스 기준)에 둔다. 변경은 GOVERNANCE.md "중요" 결정.
+fail-on-severity: critical
+deny-licenses:
+  - GPL-3.0-only
+  - GPL-3.0-or-later
+  - AGPL-3.0-only
+  - AGPL-3.0-or-later
+license-check: true
+vulnerability-check: true
+show-openssf-scorecard: true
+comment-summary-in-pr: on-failure
