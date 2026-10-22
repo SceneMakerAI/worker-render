@@ -5,6 +5,7 @@ boto3 를 쓰는 이유: 의존성이 uv.lock 에 고정되어 배포마다 같�
 전송 자체는 aws CLI 와 같다 — CLI 내부도 boto3 이고 둘 다 멀티파트로 병렬 전송한다.
 
 S3URL 이 비어 있으면 업로드를 건너뛴다 (로컬만 쓰는 환경).
+ci test comment
 """
 import logging
 from pathlib import Path
