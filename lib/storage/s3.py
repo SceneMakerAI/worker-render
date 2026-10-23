@@ -95,3 +95,4 @@ def upload_file(src: Path, s3_url: str) -> str:
     _s3().upload_file(str(src), bucket, key)
 
     return s3_url
+# [시연] 코드 수정 예시
